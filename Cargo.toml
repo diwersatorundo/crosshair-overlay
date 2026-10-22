@@ -1,0 +1,50 @@
+[package]
+name = "crosshair-overlay"
+version = "0.1.0"
+edition = "2021"
+description = "External CS2-style crosshair overlay for Windows"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+build = "build.rs"
+
+[lib]
+name = "crosshair_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crosshair-overlay"
+path = "src/main.rs"
+
+[build-dependencies]
+winresource = "0.1"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "clipboard"] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-numerics = "0.3"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
