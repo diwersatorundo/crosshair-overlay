@@ -9,24 +9,26 @@ use eframe::egui::{
     FontId, Frame, Layout, Margin, Panel, RichText, ScrollArea, Sense, Stroke, StrokeKind,
     TextEdit, TextStyle, Ui, ViewportCommand,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-const SIDEBAR_WIDTH: f32 = 218.0;
+const SIDEBAR_WIDTH: f32 = 236.0;
 
-const BG: Color32 = Color32::from_rgb(18, 20, 23);
-const SIDEBAR: Color32 = Color32::from_rgb(13, 15, 18);
-const SURFACE: Color32 = Color32::from_rgb(24, 27, 31);
-const HOVER: Color32 = Color32::from_rgb(32, 36, 41);
-const BORDER: Color32 = Color32::from_rgb(42, 47, 53);
-const BORDER_HOVER: Color32 = Color32::from_rgb(69, 77, 85);
-const TEXT: Color32 = Color32::from_rgb(231, 234, 237);
-const MUTED: Color32 = Color32::from_rgb(151, 159, 167);
-const DIM: Color32 = Color32::from_rgb(100, 108, 117);
-const ACCENT: Color32 = Color32::from_rgb(232, 154, 65);
-const ACCENT_DARK: Color32 = Color32::from_rgb(45, 35, 24);
-const RED: Color32 = Color32::from_rgb(234, 110, 105);
-const PREVIEW_BG: Color32 = Color32::from_rgb(30, 34, 38);
+const BG: Color32 = Color32::from_rgb(10, 10, 10);
+const SIDEBAR: Color32 = Color32::from_rgb(10, 10, 10);
+const SURFACE: Color32 = Color32::from_rgb(23, 23, 23);
+const HOVER: Color32 = Color32::from_rgb(32, 32, 32);
+const BORDER: Color32 = Color32::from_rgb(45, 45, 45);
+const BORDER_HOVER: Color32 = Color32::from_rgb(78, 78, 78);
+const TEXT: Color32 = Color32::from_rgb(237, 237, 237);
+const MUTED: Color32 = Color32::from_rgb(160, 160, 160);
+const DIM: Color32 = Color32::from_rgb(110, 110, 110);
+const ACCENT: Color32 = Color32::from_rgb(240, 240, 240);
+const ACCENT_DARK: Color32 = Color32::from_rgb(38, 38, 38);
+const ERROR: Color32 = Color32::from_rgb(235, 235, 235);
+const PREVIEW_BG: Color32 = Color32::from_rgb(17, 17, 17);
 
 const STYLE_NAMES: [&str; 10] = [
     "Крест (динамический)",
@@ -76,89 +78,6 @@ impl Tab {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Preset {
-    Cs2,
-    Classic,
-    Minimal,
-    Tactical,
-    Square,
-}
-
-impl Preset {
-    const ALL: [Preset; 5] = [
-        Preset::Cs2,
-        Preset::Classic,
-        Preset::Minimal,
-        Preset::Tactical,
-        Preset::Square,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Preset::Cs2 => "CS2",
-            Preset::Classic => "Классика",
-            Preset::Minimal => "Минимал",
-            Preset::Tactical => "T-прицел",
-            Preset::Square => "Квадрат",
-        }
-    }
-
-    fn apply(self, cfg: &mut Config) {
-        cfg.follow_recoil = false;
-        cfg.outline_color = Rgba::opaque(0, 0, 0);
-        cfg.outline = 1;
-        match self {
-            Preset::Cs2 => {
-                cfg.style = 4;
-                cfg.center_dot = false;
-                cfg.t_style = false;
-                cfg.gap = -1;
-                cfg.length = 5;
-                cfg.thickness = 1;
-                cfg.color = Rgba::opaque(0, 255, 0);
-            }
-            Preset::Classic => {
-                cfg.style = 0;
-                cfg.center_dot = false;
-                cfg.t_style = false;
-                cfg.gap = 2;
-                cfg.length = 6;
-                cfg.thickness = 2;
-                cfg.color = Rgba::opaque(0, 255, 70);
-            }
-            Preset::Minimal => {
-                cfg.style = 6;
-                cfg.center_dot = true;
-                cfg.t_style = false;
-                cfg.gap = 0;
-                cfg.length = 0;
-                cfg.thickness = 4;
-                cfg.outline = 0;
-                cfg.color = Rgba::opaque(255, 255, 255);
-            }
-            Preset::Tactical => {
-                cfg.style = 4;
-                cfg.center_dot = true;
-                cfg.t_style = true;
-                cfg.gap = 0;
-                cfg.length = 6;
-                cfg.thickness = 1;
-                cfg.color = Rgba::opaque(0, 255, 0);
-            }
-            Preset::Square => {
-                cfg.style = 8;
-                cfg.center_dot = false;
-                cfg.t_style = false;
-                cfg.gap = 0;
-                cfg.length = 7;
-                cfg.thickness = 2;
-                cfg.color = Rgba::opaque(0, 255, 0);
-            }
-        }
-    }
-}
-
 struct Notice {
     text: String,
     error: bool,
@@ -186,6 +105,77 @@ pub struct CrosshairApp {
     minimize_requested: bool,
     autostart: bool,
     autostart_error: Option<String>,
+    tray: Option<TrayIcon>,
+    quitting: bool,
+}
+
+#[derive(Clone, Copy)]
+enum TrayAction {
+    Show,
+    Quit,
+}
+
+static TRAY_ACTIONS: Mutex<Vec<TrayAction>> = Mutex::new(Vec::new());
+
+fn push_tray_action(ctx: &egui::Context, action: TrayAction) {
+    let mut pending = TRAY_ACTIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    pending.push(action);
+    drop(pending);
+    ctx.request_repaint();
+}
+
+fn create_tray(ctx: &egui::Context) -> Option<TrayIcon> {
+    let result = (|| -> Result<TrayIcon, String> {
+        let menu = Menu::new();
+        let show = MenuItem::with_id("show", "Открыть настройки", true, None);
+        let exit = MenuItem::with_id("exit", "Выход", true, None);
+        let separator = PredefinedMenuItem::separator();
+        menu.append_items(&[&show, &separator, &exit])
+            .map_err(|error| error.to_string())?;
+
+        let show_id = show.id().clone();
+        let exit_id = exit.id().clone();
+        let wake_ctx = ctx.clone();
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            if event.id == show_id {
+                push_tray_action(&wake_ctx, TrayAction::Show);
+            } else if event.id == exit_id {
+                push_tray_action(&wake_ctx, TrayAction::Quit);
+            }
+        }));
+
+        let wake_ctx = ctx.clone();
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            if let TrayIconEvent::Click {
+                button: tray_icon::MouseButton::Left,
+                button_state: tray_icon::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                push_tray_action(&wake_ctx, TrayAction::Show);
+            }
+        }));
+
+        let icon_data = app_icon();
+        let icon = tray_icon::Icon::from_rgba(icon_data.rgba, icon_data.width, icon_data.height)
+            .map_err(|error| error.to_string())?;
+        TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("Crosshair Overlay")
+            .with_icon(icon)
+            .build()
+            .map_err(|error| error.to_string())
+    })();
+
+    match result {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            logging::log("WARN", format!("Не удалось создать значок в трее: {error}"));
+            None
+        }
+    }
 }
 
 pub fn app_icon() -> egui::IconData {
@@ -245,6 +235,7 @@ impl CrosshairApp {
                 (false, Some(error))
             }
         };
+        let tray = create_tray(&cc.egui_ctx);
         Self {
             shared,
             cfg: config,
@@ -256,7 +247,50 @@ impl CrosshairApp {
             minimize_requested: false,
             autostart,
             autostart_error,
+            tray,
+            quitting: false,
         }
+    }
+
+    fn poll_tray(&mut self, ctx: &egui::Context) {
+        let actions = {
+            let mut pending = TRAY_ACTIONS
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            std::mem::take(&mut *pending)
+        };
+        for action in actions {
+            match action {
+                TrayAction::Show => self.show_window(ctx),
+                TrayAction::Quit => self.quit(ctx),
+            }
+        }
+    }
+
+    fn show_window(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        self.force_save();
+        ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
+    fn handle_close(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.viewport().close_requested()) {
+            return;
+        }
+        if self.quitting || self.tray.is_none() {
+            self.force_save();
+            return;
+        }
+        self.force_save();
+        ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        logging::log("INFO", "Окно свёрнуто в трей");
     }
 
     fn sync(&mut self) -> Snapshot {
@@ -310,16 +344,17 @@ impl CrosshairApp {
         ui.set_width(ui.available_width());
         ui.label(
             RichText::new("Crosshair Overlay")
-                .size(13.5)
+                .size(14.5)
                 .strong()
                 .color(TEXT),
         );
         ui.add_space(3.0);
         ui.label(
             RichText::new(format!("Версия {}", env!("CARGO_PKG_VERSION")))
-                .size(10.5)
+                .size(11.5)
                 .color(DIM),
         );
+        ui.label(RichText::new("Вайб-код проект").size(11.5).color(DIM));
         ui.add_space(24.0);
 
         for tab in [Tab::Settings, Tab::About] {
@@ -331,13 +366,13 @@ impl CrosshairApp {
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.label(
-                RichText::new("Закрытие окна завершает работу")
-                    .size(9.5)
+                RichText::new("Закрытие окна сворачивает в трей")
+                    .size(10.5)
                     .color(DIM),
             );
             ui.add_space(8.0);
             if secondary_button_sized(ui, "Выход", 32.0).clicked() {
-                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                self.quit(ui.ctx());
             }
             ui.add_space(8.0);
             if primary_button_sized(ui, "Свернуть в игру", 36.0).clicked() {
@@ -346,7 +381,7 @@ impl CrosshairApp {
             ui.add_space(10.0);
             ui.label(
                 RichText::new("Настройки сохраняются автоматически")
-                    .size(9.5)
+                    .size(10.5)
                     .color(DIM),
             );
             ui.add_space(16.0);
@@ -364,17 +399,17 @@ impl CrosshairApp {
             ui.vertical(|ui| {
                 ui.label(
                     RichText::new(self.tab.title())
-                        .size(23.0)
+                        .size(25.0)
                         .strong()
                         .color(TEXT),
                 );
                 ui.add_space(2.0);
-                ui.label(RichText::new(self.tab.subtitle()).size(11.5).color(MUTED));
+                ui.label(RichText::new(self.tab.subtitle()).size(12.5).color(MUTED));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.checkbox(
                     &mut self.cfg.enabled,
-                    RichText::new("Прицел включён").size(11.5).color(MUTED),
+                    RichText::new("Прицел включён").size(12.5).color(MUTED),
                 )
                 .on_hover_text("Переключить прицел. Горячая клавиша: Ctrl+Alt+X");
             });
@@ -419,7 +454,7 @@ impl CrosshairApp {
                     RichText::new(
                         "Превью в масштабе ×2; в игре размер зависит от высоты активного окна.",
                     )
-                    .size(10.0)
+                    .size(11.0)
                     .color(DIM),
                 )
                 .wrap(),
@@ -488,14 +523,14 @@ impl CrosshairApp {
             egui::pos2(rect.left() + 12.0, rect.top() + 10.0),
             Align2::LEFT_TOP,
             "ПРЕВЬЮ",
-            FontId::proportional(9.0),
+            FontId::proportional(11.0),
             Color32::from_rgba_unmultiplied(255, 255, 255, 95),
         );
         painter.text(
             egui::pos2(rect.right() - 12.0, rect.top() + 10.0),
             Align2::RIGHT_TOP,
             format!("×{zoom:.2}"),
-            FontId::monospace(9.0),
+            FontId::monospace(10.0),
             Color32::from_rgba_unmultiplied(255, 255, 255, 105),
         );
         painter.rect_stroke(
@@ -507,23 +542,9 @@ impl CrosshairApp {
     }
 
     fn settings_page(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        self.share_controls(ui, ctx);
+        section_divider(ui);
         section_heading(ui, "ПРИЦЕЛ");
-        field_label(ui, "Пресет", None);
-        ui.horizontal_wrapped(|ui| {
-            for preset in Preset::ALL {
-                let response = ui.add_sized(
-                    [78.0, 29.0],
-                    Button::new(RichText::new(preset.label()).size(11.0).color(MUTED))
-                        .fill(SURFACE)
-                        .stroke(Stroke::new(1.0, BORDER))
-                        .corner_radius(CornerRadius::same(4)),
-                );
-                if response.clicked() {
-                    preset.apply(&mut self.cfg);
-                }
-            }
-        });
-        ui.add_space(10.0);
 
         field_label(
             ui,
@@ -542,7 +563,7 @@ impl CrosshairApp {
         ui.add(
             egui::Label::new(
                 RichText::new(STYLE_DESCRIPTIONS[self.cfg.style as usize])
-                    .size(10.0)
+                    .size(11.0)
                     .color(DIM),
             )
             .wrap(),
@@ -552,13 +573,13 @@ impl CrosshairApp {
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(
                 &mut self.cfg.center_dot,
-                RichText::new("Точка в центре").size(11.5).color(TEXT),
+                RichText::new("Точка в центре").size(12.5).color(TEXT),
             )
             .on_hover_text("Добавляет точку в центр прицела.");
             ui.add_space(16.0);
             ui.checkbox(
                 &mut self.cfg.t_style,
-                RichText::new("T-образный прицел").size(11.5).color(TEXT),
+                RichText::new("T-образный прицел").size(12.5).color(TEXT),
             )
             .on_hover_text("Убирает верхний луч у креста.");
         });
@@ -590,7 +611,7 @@ impl CrosshairApp {
                 Some("Длина каждого луча в пикселях при опорной высоте экрана."),
             );
             columns[0].add_sized(
-                [columns[0].available_width(), 20.0],
+                [columns[0].available_width(), 24.0],
                 egui::Slider::new(&mut self.cfg.length, 0..=64).suffix(" px"),
             );
             field_label(
@@ -599,7 +620,7 @@ impl CrosshairApp {
                 Some("Толщина лучей и центральной точки."),
             );
             columns[1].add_sized(
-                [columns[1].available_width(), 20.0],
+                [columns[1].available_width(), 24.0],
                 egui::Slider::new(&mut self.cfg.thickness, 1..=20).suffix(" px"),
             );
         });
@@ -608,20 +629,14 @@ impl CrosshairApp {
         field_label(
             ui,
             "Зазор",
-            Some("Расстояние от центра до начала лучей. Полный диапазон CS2: −3840…3840."),
+            Some(
+                "Расстояние от центра до начала лучей. Полный диапазон задаётся через share code.",
+            ),
         );
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [(ui.available_width() - 92.0).max(80.0), 20.0],
-                egui::Slider::new(&mut self.cfg.gap, -30..=30).suffix(" px"),
-            );
-            ui.add(
-                DragValue::new(&mut self.cfg.gap)
-                    .range(-3840..=3840)
-                    .speed(0.5)
-                    .suffix(" px"),
-            );
-        });
+        ui.add_sized(
+            [ui.available_width(), 24.0],
+            egui::Slider::new(&mut self.cfg.gap, -30..=30).suffix(" px"),
+        );
         ui.add_space(10.0);
 
         ui.columns(2, |columns| {
@@ -634,7 +649,7 @@ impl CrosshairApp {
                 RichText::new(
                     "Динамический разброс, отдача и shot feedback не анимируются: оверлей не читает память игры.",
                 )
-                .size(10.0)
+                .size(11.0)
                 .color(DIM),
             )
             .wrap(),
@@ -645,7 +660,7 @@ impl CrosshairApp {
         ui.checkbox(
             &mut self.cfg.scale_with_screen,
             RichText::new("Масштабировать под экран")
-                .size(11.5)
+                .size(12.5)
                 .color(TEXT),
         )
         .on_hover_text("Размер прицела подстраивается под высоту активного окна.");
@@ -656,7 +671,7 @@ impl CrosshairApp {
             Some("Высота, для которой заданы пиксельные размеры прицела."),
         );
         ui.add_sized(
-            [ui.available_width(), 20.0],
+            [ui.available_width(), 24.0],
             egui::Slider::new(&mut self.cfg.screen_height, 240..=4320).suffix(" px"),
         );
         ui.add_space(10.0);
@@ -697,7 +712,7 @@ impl CrosshairApp {
             .checkbox(
                 &mut autostart,
                 RichText::new("Запускать при входе в Windows")
-                    .size(11.5)
+                    .size(12.5)
                     .color(TEXT),
             )
             .on_hover_text("Добавляет приложение в автозапуск текущего пользователя.")
@@ -728,15 +743,12 @@ impl CrosshairApp {
             ui.add(
                 egui::Label::new(
                     RichText::new(format!("Автозапуск: {error}"))
-                        .size(10.0)
-                        .color(RED),
+                        .size(11.0)
+                        .color(ERROR),
                 )
                 .wrap(),
             );
         }
-
-        section_divider(ui);
-        self.share_controls(ui, ctx);
     }
 
     fn share_controls(&mut self, ui: &mut Ui, ctx: &egui::Context) {
@@ -763,7 +775,7 @@ impl CrosshairApp {
             ui.add(
                 egui::Label::new(
                     RichText::new("Вставьте в CS2: Настройки → Прицел → Импорт.")
-                        .size(10.0)
+                        .size(11.0)
                         .color(DIM),
                 )
                 .wrap(),
@@ -790,7 +802,7 @@ impl CrosshairApp {
             ui.add(
                 egui::Label::new(
                     RichText::new("Поддерживаются CS2 v1 и legacy CS:GO/CS2 коды.")
-                        .size(10.0)
+                        .size(11.0)
                         .color(DIM),
                 )
                 .wrap(),
@@ -800,7 +812,7 @@ impl CrosshairApp {
 
         egui::CollapsingHeader::new(
             RichText::new("Динамические параметры кода")
-                .size(11.0)
+                .size(12.0)
                 .color(MUTED),
         )
         .default_open(false)
@@ -810,7 +822,7 @@ impl CrosshairApp {
                     RichText::new(
                         "Оверлей не анимирует эти значения, но сохраняет их в share code.",
                     )
-                    .size(10.0)
+                    .size(11.0)
                     .color(DIM),
                 )
                 .wrap(),
@@ -819,19 +831,19 @@ impl CrosshairApp {
             ui.checkbox(
                 &mut self.cfg.follow_recoil,
                 RichText::new("Следование за отдачей")
-                    .size(11.5)
+                    .size(12.5)
                     .color(TEXT),
             );
             ui.add_space(6.0);
             ui.columns(2, |columns| {
                 field_label(&mut columns[0], "Spread limit", None);
                 columns[0].add_sized(
-                    [columns[0].available_width(), 20.0],
+                    [columns[0].available_width(), 24.0],
                     egui::Slider::new(&mut self.cfg.dynamic_spread_limit, 0..=255),
                 );
                 field_label(&mut columns[1], "Split distance", None);
                 columns[1].add_sized(
-                    [columns[1].available_width(), 20.0],
+                    [columns[1].available_width(), 24.0],
                     egui::Slider::new(&mut self.cfg.split_distance, 0..=127),
                 );
             });
@@ -839,12 +851,12 @@ impl CrosshairApp {
             ui.columns(2, |columns| {
                 field_label(&mut columns[0], "Inner split alpha", None);
                 columns[0].add_sized(
-                    [columns[0].available_width(), 20.0],
+                    [columns[0].available_width(), 24.0],
                     egui::Slider::new(&mut self.cfg.inner_split_alpha, 0.0..=1.0).fixed_decimals(2),
                 );
                 field_label(&mut columns[1], "Outer split alpha", None);
                 columns[1].add_sized(
-                    [columns[1].available_width(), 20.0],
+                    [columns[1].available_width(), 24.0],
                     egui::Slider::new(&mut self.cfg.outer_split_alpha, 0.3..=1.0).fixed_decimals(2),
                 );
             });
@@ -852,12 +864,12 @@ impl CrosshairApp {
             ui.columns(2, |columns| {
                 field_label(&mut columns[0], "Split size ratio", None);
                 columns[0].add_sized(
-                    [columns[0].available_width(), 20.0],
+                    [columns[0].available_width(), 24.0],
                     egui::Slider::new(&mut self.cfg.split_size_ratio, 0.0..=1.0).fixed_decimals(2),
                 );
                 field_label(&mut columns[1], "Scope dot scale", None);
                 columns[1].add_sized(
-                    [columns[1].available_width(), 20.0],
+                    [columns[1].available_width(), 24.0],
                     egui::Slider::new(&mut self.cfg.scope_dot_scale, 0.1..=2.0).fixed_decimals(2),
                 );
             });
@@ -865,7 +877,7 @@ impl CrosshairApp {
             ui.checkbox(
                 &mut self.cfg.scope_dot_color_match,
                 RichText::new("Scope dot использует цвет прицела")
-                    .size(11.5)
+                    .size(12.5)
                     .color(TEXT),
             );
         });
@@ -923,7 +935,7 @@ impl CrosshairApp {
                 "Версия {} · Rust + egui + Direct2D",
                 env!("CARGO_PKG_VERSION")
             ))
-            .size(10.5)
+            .size(11.5)
             .color(DIM),
         );
         ui.add_space(6.0);
@@ -932,7 +944,20 @@ impl CrosshairApp {
                 RichText::new(
                     "Внешний статичный прицел поверх активного окна. Приложение не внедряется в процесс игры, не читает и не изменяет память.",
                 )
-                .size(11.5)
+                .size(12.5)
+                .color(MUTED),
+            )
+            .wrap(),
+        );
+
+        section_divider(ui);
+        section_heading(ui, "ВАЙБ-КОД ПРОЕКТ");
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Проект написан в формате вайб-кодинга: большая часть кода и документации создана с помощью ИИ и затем проверена вручную.",
+                )
+                .size(12.5)
                 .color(MUTED),
             )
             .wrap(),
@@ -944,6 +969,7 @@ impl CrosshairApp {
             "Запустите игру в оконном или безрамочном режиме.",
             "Сверните настройки или переключитесь в игру.",
             "Ctrl+Alt+X включает и выключает прицел.",
+            "Закрытие окна сворачивает приложение в трей.",
         ] {
             bullet(ui, text);
         }
@@ -964,7 +990,7 @@ impl CrosshairApp {
                 RichText::new(
                     "Сторонние оверлеи могут нарушать правила отдельных игр и античит-систем. Используйте приложение на свой риск.",
                 )
-                .size(10.5)
+                .size(11.5)
                 .color(MUTED),
             )
             .wrap(),
@@ -976,7 +1002,7 @@ impl CrosshairApp {
         ui.add(
             egui::Label::new(
                 RichText::new(config::config_path().display().to_string())
-                    .size(10.0)
+                    .size(11.0)
                     .monospace()
                     .color(MUTED),
             )
@@ -987,7 +1013,7 @@ impl CrosshairApp {
         ui.add(
             egui::Label::new(
                 RichText::new(logging::log_path().display().to_string())
-                    .size(10.0)
+                    .size(11.0)
                     .monospace()
                     .color(MUTED),
             )
@@ -1009,8 +1035,10 @@ impl CrosshairApp {
 
 impl eframe::App for CrosshairApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_tray(ctx);
         self.sync();
         self.flush_save();
+        self.handle_close(ctx);
         if self.dirty_since.is_some() || self.notice.is_some() {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
@@ -1036,9 +1064,6 @@ impl eframe::App for CrosshairApp {
                 self.main_content(ui, &snapshot, &ctx);
             });
 
-        if ctx.input(|input| input.viewport().close_requested()) {
-            self.force_save();
-        }
         self.commit_if_changed(&before);
         self.flush_save();
         if self.minimize_requested {
@@ -1064,13 +1089,13 @@ fn configure_theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BG;
     visuals.window_fill = SURFACE;
-    visuals.extreme_bg_color = Color32::from_rgb(12, 14, 16);
+    visuals.extreme_bg_color = Color32::from_rgb(16, 16, 16);
     visuals.faint_bg_color = SURFACE;
-    visuals.code_bg_color = Color32::from_rgb(14, 16, 19);
+    visuals.code_bg_color = Color32::from_rgb(18, 18, 18);
     visuals.override_text_color = Some(TEXT);
     visuals.hyperlink_color = ACCENT;
     visuals.warn_fg_color = ACCENT;
-    visuals.error_fg_color = RED;
+    visuals.error_fg_color = ERROR;
     visuals.window_stroke = Stroke::new(1.0, BORDER);
     visuals.window_corner_radius = CornerRadius::same(5);
     visuals.menu_corner_radius = CornerRadius::same(5);
@@ -1080,76 +1105,76 @@ fn configure_theme(ctx: &egui::Context) {
     visuals.widgets.noninteractive.weak_bg_fill = SURFACE;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, MUTED);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(4);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(5);
     visuals.widgets.inactive.bg_fill = SURFACE;
     visuals.widgets.inactive.weak_bg_fill = SURFACE;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(4);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(5);
     visuals.widgets.hovered.bg_fill = HOVER;
     visuals.widgets.hovered.weak_bg_fill = HOVER;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_HOVER);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.2, Color32::WHITE);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(4);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(5);
     visuals.widgets.active.bg_fill = ACCENT_DARK;
     visuals.widgets.active.weak_bg_fill = ACCENT_DARK;
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
     visuals.widgets.active.fg_stroke = Stroke::new(1.2, Color32::WHITE);
-    visuals.widgets.active.corner_radius = CornerRadius::same(4);
+    visuals.widgets.active.corner_radius = CornerRadius::same(5);
     visuals.widgets.open.bg_fill = HOVER;
     visuals.widgets.open.weak_bg_fill = HOVER;
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, BORDER_HOVER);
     visuals.widgets.open.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.open.corner_radius = CornerRadius::same(4);
+    visuals.widgets.open.corner_radius = CornerRadius::same(5);
 
     ctx.set_visuals_of(egui::Theme::Dark, visuals.clone());
     ctx.set_visuals_of(egui::Theme::Light, visuals);
 
     for theme in [egui::Theme::Dark, egui::Theme::Light] {
         ctx.style_mut_of(theme, |style| {
-            style.spacing.item_spacing = vec2(10.0, 8.0);
-            style.spacing.button_padding = vec2(11.0, 6.0);
-            style.spacing.interact_size.y = 26.0;
-            style.spacing.slider_width = 160.0;
-            style.spacing.combo_width = 160.0;
+            style.spacing.item_spacing = vec2(10.0, 10.0);
+            style.spacing.button_padding = vec2(13.0, 7.0);
+            style.spacing.interact_size.y = 30.0;
+            style.spacing.slider_width = 190.0;
+            style.spacing.combo_width = 190.0;
             style.spacing.window_margin = Margin::same(0);
             style.spacing.menu_margin = Margin::same(6);
             style.animation_time = 0.1;
             style
                 .text_styles
-                .insert(TextStyle::Heading, FontId::proportional(22.0));
+                .insert(TextStyle::Heading, FontId::proportional(24.0));
             style
                 .text_styles
-                .insert(TextStyle::Body, FontId::proportional(12.5));
+                .insert(TextStyle::Body, FontId::proportional(13.5));
             style
                 .text_styles
-                .insert(TextStyle::Button, FontId::proportional(12.5));
+                .insert(TextStyle::Button, FontId::proportional(13.5));
             style
                 .text_styles
-                .insert(TextStyle::Small, FontId::proportional(10.0));
+                .insert(TextStyle::Small, FontId::proportional(11.0));
             style
                 .text_styles
-                .insert(TextStyle::Monospace, FontId::monospace(11.5));
+                .insert(TextStyle::Monospace, FontId::monospace(12.5));
         });
     }
 }
 
 fn nav_item(ui: &mut Ui, selected: bool, label: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
     let hovered = response.hovered();
     let fill = if selected {
-        HOVER
-    } else if hovered {
         SURFACE
+    } else if hovered {
+        HOVER
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    ui.painter().rect_filled(rect, CornerRadius::same(5), fill);
     ui.painter().text(
         egui::pos2(rect.left() + 12.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(12.5),
+        FontId::proportional(13.5),
         if selected || hovered { TEXT } else { MUTED },
     );
     if hovered {
@@ -1159,10 +1184,10 @@ fn nav_item(ui: &mut Ui, selected: bool, label: &str) -> egui::Response {
 }
 
 fn status_plain(ui: &mut Ui, snapshot: &Snapshot, enabled: bool) {
-    ui.label(RichText::new("СТАТУС").size(9.0).strong().color(DIM));
+    ui.label(RichText::new("СТАТУС").size(10.0).strong().color(DIM));
     ui.add_space(3.0);
     let (label, color) = if snapshot.overlay_error.is_some() {
-        ("Ошибка оверлея", RED)
+        ("Ошибка оверлея", ERROR)
     } else if !snapshot.overlay_running {
         ("Запуск оверлея…", MUTED)
     } else if enabled {
@@ -1170,13 +1195,13 @@ fn status_plain(ui: &mut Ui, snapshot: &Snapshot, enabled: bool) {
     } else {
         ("Прицел выключен", MUTED)
     };
-    ui.label(RichText::new(label).size(11.5).strong().color(color));
+    ui.label(RichText::new(label).size(12.5).strong().color(color));
     ui.add_space(2.0);
-    ui.label(RichText::new("Ctrl+Alt+X — вкл/выкл").size(9.5).color(DIM));
+    ui.label(RichText::new("Ctrl+Alt+X — вкл/выкл").size(10.5).color(DIM));
 }
 
 fn section_heading(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(9.5).strong().color(DIM));
+    ui.label(RichText::new(text).size(10.5).strong().color(DIM));
     ui.add_space(7.0);
 }
 
@@ -1187,7 +1212,7 @@ fn section_divider(ui: &mut Ui) {
 }
 
 fn field_label(ui: &mut Ui, label: &str, hint: Option<&str>) {
-    let response = ui.label(RichText::new(label).size(11.0).color(MUTED));
+    let response = ui.label(RichText::new(label).size(12.0).color(MUTED));
     if let Some(hint) = hint {
         response.on_hover_text(hint);
     }
@@ -1195,60 +1220,56 @@ fn field_label(ui: &mut Ui, label: &str, hint: Option<&str>) {
 }
 
 fn plain_notice(ui: &mut Ui, text: impl Into<String>, error: bool) {
-    ui.add(
-        egui::Label::new(RichText::new(text.into()).size(11.0).color(if error {
-            RED
-        } else {
-            MUTED
-        }))
-        .wrap(),
-    );
+    let text = RichText::new(text.into())
+        .size(12.0)
+        .color(if error { ERROR } else { MUTED });
+    ui.add(egui::Label::new(if error { text.strong() } else { text }).wrap());
     ui.add_space(6.0);
 }
 
 fn bullet(ui: &mut Ui, text: &str) {
     ui.horizontal_top(|ui| {
-        ui.label(RichText::new("—").size(10.5).color(DIM));
-        ui.add(egui::Label::new(RichText::new(text).size(11.0).color(MUTED)).wrap());
+        ui.label(RichText::new("—").size(11.5).color(DIM));
+        ui.add(egui::Label::new(RichText::new(text).size(12.0).color(MUTED)).wrap());
     });
     ui.add_space(3.0);
 }
 
 fn primary_button(ui: &mut Ui, text: &str) -> egui::Response {
     ui.add(
-        Button::new(RichText::new(text).size(11.5).color(ACCENT))
-            .fill(ACCENT_DARK)
-            .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.6)))
-            .corner_radius(CornerRadius::same(4)),
+        Button::new(RichText::new(text).size(12.5).color(BG))
+            .fill(ACCENT)
+            .stroke(Stroke::NONE)
+            .corner_radius(CornerRadius::same(5)),
     )
 }
 
 fn primary_button_sized(ui: &mut Ui, text: &str, height: f32) -> egui::Response {
     ui.add_sized(
         [ui.available_width(), height],
-        Button::new(RichText::new(text).size(12.5).color(ACCENT))
-            .fill(ACCENT_DARK)
-            .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.6)))
-            .corner_radius(CornerRadius::same(4)),
+        Button::new(RichText::new(text).size(13.5).color(BG))
+            .fill(ACCENT)
+            .stroke(Stroke::NONE)
+            .corner_radius(CornerRadius::same(5)),
     )
 }
 
 fn secondary_button(ui: &mut Ui, text: &str) -> egui::Response {
     ui.add(
-        Button::new(RichText::new(text).size(11.5).color(MUTED))
+        Button::new(RichText::new(text).size(12.5).color(MUTED))
             .fill(SURFACE)
             .stroke(Stroke::new(1.0, BORDER))
-            .corner_radius(CornerRadius::same(4)),
+            .corner_radius(CornerRadius::same(5)),
     )
 }
 
 fn secondary_button_sized(ui: &mut Ui, text: &str, height: f32) -> egui::Response {
     ui.add_sized(
         [ui.available_width(), height],
-        Button::new(RichText::new(text).size(12.0).color(MUTED))
-            .fill(Color32::TRANSPARENT)
+        Button::new(RichText::new(text).size(13.0).color(MUTED))
+            .fill(SURFACE)
             .stroke(Stroke::new(1.0, BORDER))
-            .corner_radius(CornerRadius::same(4)),
+            .corner_radius(CornerRadius::same(5)),
     )
 }
 
@@ -1263,7 +1284,7 @@ fn color_field(ui: &mut Ui, label: &str, value: &mut Rgba) {
         }
         ui.label(
             RichText::new(hex_color(*value))
-                .size(10.5)
+                .size(11.5)
                 .monospace()
                 .color(MUTED),
         );

@@ -28,7 +28,7 @@ fn main() {
                 if GetLastError() == ERROR_ALREADY_EXISTS {
                     let _ = CloseHandle(handle);
                     show_message(
-                        "Crosshair Overlay уже запущен.\nПроверьте панель задач.",
+                        "Crosshair Overlay уже запущен.\nПроверьте системный трей.",
                         false,
                     );
                     return;
